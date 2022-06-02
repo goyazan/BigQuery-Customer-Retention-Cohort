@@ -1,0 +1,89 @@
+WITH
+
+# Creates, transforms and extends with necessary columns the sessions data
+t1 AS(
+SELECT
+    customer_id,
+    session_date,
+    FORMAT_DATE('%Y%m', session_date) AS session_month,
+    FORMAT_DATE('%Y%m', PARSE_DATE('%Y%m%d', CAST(first_session_date AS STRING))) AS first_session_month
+FROM(
+    SELECT
+        PARSE_DATE('%Y%m%d', CAST(report_for_date AS STRING)) AS session_date,
+        customer_id,
+        MIN(report_for_date) OVER(PARTITION BY customer_id) AS first_session_date
+    FROM
+        taara_share_analytics.customer_network_sessions
+)
+GROUP BY
+    customer_id,
+    session_date,
+    session_month,
+    first_session_month), 
+
+
+
+# Creates a customer lookup table with a 'User Status' column
+t2 AS(
+    SELECT DISTINCT 
+        customer_id,
+        IF(LAST_VALUE(plan_display_name) OVER(PARTITION BY customer_id ORDER BY txn_epoch_seconds ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) = '500 MB Free Trial', 'Free', 'Paying') AS user_status
+    FROM
+        taara_share_analytics.customer_topups),
+
+
+
+# Joins t1 with t2
+t3 AS(
+    SELECT
+        t1.customer_id,
+        t1.session_date,
+        t1.session_month,
+        t1.first_session_month
+    FROM
+        t1
+    LEFT OUTER JOIN
+        t2
+        ON t1.customer_id = t2.customer_id
+    WHERE
+        t2.user_status = 'Paying'),
+
+
+
+# Counts total users per cohort and per user status category
+t4 AS(
+    SELECT
+        first_session_month,
+        COUNT(DISTINCT customer_id) AS total_users
+    FROM
+        t3
+    GROUP BY
+        first_session_month)
+
+
+
+# The final query that joins t3 with t4 to calculate retention rates per cohort and user status category
+SELECT
+    first_session_month,
+    session_month,
+    COUNT(DISTINCT customer_id) AS number_of_users,
+    MIN(total_users) AS total_users,
+    COUNT(DISTINCT customer_id) / MIN(total_users) AS retention_rate
+FROM(
+    SELECT
+        t3.customer_id,
+        t3.session_month,
+        t3.first_session_month,
+        t4.total_users
+    FROM
+        t3
+    LEFT OUTER JOIN
+        t4
+        ON t3.first_session_month = t4.first_session_month
+)
+GROUP BY
+    first_session_month,
+    session_month
+ORDER BY
+    first_session_month ASC,
+    session_month ASC
